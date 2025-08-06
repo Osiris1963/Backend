@@ -1,6 +1,7 @@
 # ==============================================================================
-# UNIFIED AI FORECASTER v6.0 (Monolithic Build)
+# UNIFIED AI FORECASTER v6.1 (Monolithic Build)
 # All logic is contained in this single file for robust, atomic deployment.
+# This version includes a data integrity fix for the 'Edit Data' tab.
 # ==============================================================================
 
 import streamlit as st
@@ -195,7 +196,7 @@ def generate_forecast(historical_df, events_df, periods=15):
 
 def main():
     st.set_page_config(
-        page_title="Unified AI Forecaster v6.0",
+        page_title="Unified AI Forecaster v6.1",
         page_icon="https://upload.wikimedia.org/wikipedia/commons/thumb/3/36/McDonald%27s_Golden_Arches.svg/1200px-McDonald%27s_Golden_Arches.svg.png",
         layout="wide",
         initial_sidebar_state="expanded"
@@ -254,7 +255,7 @@ def main():
         with st.sidebar:
             st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/3/36/McDonald%27s_Golden_Arches.svg/1200px-McDonald%27s_Golden_Arches.svg.png")
             st.title("Unified AI Forecaster")
-            st.info("Atomic Build v6.0")
+            st.info("Atomic Build v6.1")
             if st.button("🔄 Refresh Data"):
                 st.cache_data.clear()
                 st.rerun()
@@ -305,12 +306,28 @@ def main():
                     doc_id = row.get('doc_id', str(row['date']))
                     with st.expander(f"{row['date'].strftime('%B %d, %Y')} - Sales: ₱{row.get('sales', 0):,.2f}"):
                         with st.form(key=f"edit_form_{doc_id}", border=False):
-                            day_type = st.selectbox("Day Type", ["Normal Day", "Not Normal Day"], index=["Normal Day", "Not Normal Day"].index(row.get('day_type', 'Normal Day')), key=f"dtype_{doc_id}")
+                            
+                            # --- ROBUST DATA HANDLING FIX ---
+                            # This block prevents the app from crashing if 'day_type' from Firestore is invalid.
+                            day_type_options = ["Normal Day", "Not Normal Day"]
+                            current_day_type = row.get('day_type', 'Normal Day')
+                            # If the value from the database isn't one of our valid options, default to the first one.
+                            if current_day_type not in day_type_options:
+                                current_day_type = day_type_options[0] 
+                            current_index = day_type_options.index(current_day_type)
+                            # --- END FIX ---
+
+                            day_type = st.selectbox("Day Type", day_type_options, index=current_index, key=f"dtype_{doc_id}")
+                            
                             if st.form_submit_button("💾 Update"):
-                                db.collection('historical_data').document(row['doc_id']).update({'day_type': day_type})
-                                st.success(f"Updated record for {row['date'].strftime('%Y-%m-%d')}")
-                                st.cache_data.clear()
-                                time.sleep(1); st.rerun()
+                                # Ensure doc_id exists before trying to update
+                                if 'doc_id' in row and pd.notna(row['doc_id']):
+                                    db.collection('historical_data').document(row['doc_id']).update({'day_type': day_type})
+                                    st.success(f"Updated record for {row['date'].strftime('%Y-%m-%d')}")
+                                    st.cache_data.clear()
+                                    time.sleep(1); st.rerun()
+                                else:
+                                    st.error(f"Cannot update record for {row['date'].strftime('%Y-%m-%d')} - missing document ID.")
             else:
                 st.info("No historical data found.")
     else:
