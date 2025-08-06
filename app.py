@@ -1,7 +1,7 @@
 # ==============================================================================
-# UNIFIED AI FORECASTER v6.1 (Monolithic Build)
+# UNIFIED AI FORECASTER v6.2 (Monolithic Build)
 # All logic is contained in this single file for robust, atomic deployment.
-# This version includes a data integrity fix for the 'Edit Data' tab.
+# This version includes a logical fix for the 'atv' KeyError.
 # ==============================================================================
 
 import streamlit as st
@@ -18,13 +18,11 @@ import traceback
 
 # ==============================================================================
 # SECTION 1: DATA PROCESSING LOGIC
-# (Formerly data_processing.py)
 # ==============================================================================
 
 def load_from_firestore(db_client, collection_name):
     """
     Loads and preprocesses data from a Firestore collection.
-    Ensures data is sorted, de-duplicated, and correctly typed.
     """
     if db_client is None:
         return pd.DataFrame()
@@ -120,7 +118,6 @@ def create_features(df, events_df):
 
 # ==============================================================================
 # SECTION 2: FORECASTING LOGIC
-# (Formerly forecasting.py)
 # ==============================================================================
 
 def generate_forecast(historical_df, events_df, periods=15):
@@ -128,26 +125,35 @@ def generate_forecast(historical_df, events_df, periods=15):
     Generates a multivariate, point forecast using a Darts NBEATS model.
     """
     try:
+        # --- LOGICAL FIX: Create features on historical data FIRST ---
+        # This ensures the 'atv' column exists before we try to use it.
+        historical_df_featured = create_features(historical_df.copy(), events_df)
+        
+        # Now create the future features dataframe
         future_date_range = pd.date_range(
-            start=historical_df['date'].max() + pd.Timedelta(days=1),
+            start=historical_df_featured['date'].max() + pd.Timedelta(days=1),
             periods=periods
         )
         future_df_template = pd.DataFrame({'date': future_date_range})
-        combined_df = pd.concat([historical_df, future_df_template], ignore_index=True)
-        df_featured = create_features(combined_df, events_df)
+        # We need to combine with the *featured* historical df to calculate rolling features correctly
+        combined_df = pd.concat([historical_df_featured, future_df_template], ignore_index=True)
+        df_featured_full = create_features(combined_df, events_df)
         
         target_cols = ['customers', 'atv']
         feature_cols = [
-            col for col in df_featured.columns if col not in 
+            col for col in df_featured_full.columns if col not in 
             ['date', 'doc_id', 'sales', 'customers', 'atv', 'add_on_sales', 'day_type', 'day_type_notes']
         ]
 
+        # Use the featured historical dataframe to create the target series
         ts_target = TimeSeries.from_dataframe(
-            historical_df, time_col='date', value_cols=target_cols, freq='D'
+            historical_df_featured, time_col='date', value_cols=target_cols, freq='D'
         )
+        # Use the full dataframe (historical + future) for the feature series
         ts_features = TimeSeries.from_dataframe(
-            df_featured, time_col='date', value_cols=feature_cols, freq='D'
+            df_featured_full, time_col='date', value_cols=feature_cols, freq='D'
         )
+        # --- END FIX ---
 
         scaler_target = Scaler()
         scaler_features = Scaler()
@@ -191,12 +197,11 @@ def generate_forecast(historical_df, events_df, periods=15):
 
 # ==============================================================================
 # SECTION 3: STREAMLIT APPLICATION UI & MAIN LOGIC
-# (Formerly app.py)
 # ==============================================================================
 
 def main():
     st.set_page_config(
-        page_title="Unified AI Forecaster v6.1",
+        page_title="Unified AI Forecaster v6.2",
         page_icon="https://upload.wikimedia.org/wikipedia/commons/thumb/3/36/McDonald%27s_Golden_Arches.svg/1200px-McDonald%27s_Golden_Arches.svg.png",
         layout="wide",
         initial_sidebar_state="expanded"
@@ -255,7 +260,7 @@ def main():
         with st.sidebar:
             st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/3/36/McDonald%27s_Golden_Arches.svg/1200px-McDonald%27s_Golden_Arches.svg.png")
             st.title("Unified AI Forecaster")
-            st.info("Atomic Build v6.1")
+            st.info("Atomic Build v6.2")
             if st.button("🔄 Refresh Data"):
                 st.cache_data.clear()
                 st.rerun()
@@ -265,7 +270,9 @@ def main():
                     st.error("Need at least 30 days of data for the model to train.")
                 else:
                     st.session_state.forecast_df = pd.DataFrame()
-                    forecast_df = generate_forecast(historical_df, events_df, periods=15)
+                    with st.spinner("Processing data and generating forecast..."):
+                        forecast_df = generate_forecast(historical_df, events_df, periods=15)
+                    
                     if not forecast_df.empty:
                         st.session_state.forecast_df = forecast_df
                         st.success("Forecast Generated Successfully!")
@@ -279,9 +286,11 @@ def main():
             st.header("📈 Forecast Dashboard")
             if not st.session_state.forecast_df.empty:
                 historical_df, _ = get_data(db)
+                # We need the version with 'atv' for plotting
+                historical_df_featured = create_features(historical_df, pd.DataFrame())
                 for target in ['sales', 'customers', 'atv']:
                     fig = go.Figure()
-                    fig.add_trace(go.Scatter(x=historical_df['date'], y=historical_df[target], mode='lines', name='Historical', line=dict(color='#ffffff')))
+                    fig.add_trace(go.Scatter(x=historical_df_featured['date'], y=historical_df_featured[target], mode='lines', name='Historical', line=dict(color='#ffffff')))
                     fig.add_trace(go.Scatter(x=st.session_state.forecast_df['ds'], y=st.session_state.forecast_df[f'forecast_{target}'], mode='lines', name='Forecast', line=dict(color='#c8102e', dash='dash')))
                     title_map = {'sales': 'Sales (PHP)', 'customers': 'Customer Count', 'atv': 'Avg. Transaction (PHP)'}
                     fig.update_layout(title=f'Historical vs. Forecasted {title_map[target]}', template='plotly_dark', legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
@@ -307,20 +316,15 @@ def main():
                     with st.expander(f"{row['date'].strftime('%B %d, %Y')} - Sales: ₱{row.get('sales', 0):,.2f}"):
                         with st.form(key=f"edit_form_{doc_id}", border=False):
                             
-                            # --- ROBUST DATA HANDLING FIX ---
-                            # This block prevents the app from crashing if 'day_type' from Firestore is invalid.
                             day_type_options = ["Normal Day", "Not Normal Day"]
                             current_day_type = row.get('day_type', 'Normal Day')
-                            # If the value from the database isn't one of our valid options, default to the first one.
                             if current_day_type not in day_type_options:
                                 current_day_type = day_type_options[0] 
                             current_index = day_type_options.index(current_day_type)
-                            # --- END FIX ---
 
                             day_type = st.selectbox("Day Type", day_type_options, index=current_index, key=f"dtype_{doc_id}")
                             
                             if st.form_submit_button("💾 Update"):
-                                # Ensure doc_id exists before trying to update
                                 if 'doc_id' in row and pd.notna(row['doc_id']):
                                     db.collection('historical_data').document(row['doc_id']).update({'day_type': day_type})
                                     st.success(f"Updated record for {row['date'].strftime('%Y-%m-%d')}")
