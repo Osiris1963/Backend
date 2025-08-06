@@ -1,7 +1,7 @@
 # ==============================================================================
-# UNIFIED AI FORECASTER v6.2 (Monolithic Build)
+# UNIFIED AI FORECASTER v6.3 (Monolithic Build)
 # All logic is contained in this single file for robust, atomic deployment.
-# This version includes a logical fix for the 'atv' KeyError.
+# This version includes an explicit feature selection fix for data purity.
 # ==============================================================================
 
 import streamlit as st
@@ -125,35 +125,41 @@ def generate_forecast(historical_df, events_df, periods=15):
     Generates a multivariate, point forecast using a Darts NBEATS model.
     """
     try:
-        # --- LOGICAL FIX: Create features on historical data FIRST ---
-        # This ensures the 'atv' column exists before we try to use it.
         historical_df_featured = create_features(historical_df.copy(), events_df)
         
-        # Now create the future features dataframe
         future_date_range = pd.date_range(
             start=historical_df_featured['date'].max() + pd.Timedelta(days=1),
             periods=periods
         )
         future_df_template = pd.DataFrame({'date': future_date_range})
-        # We need to combine with the *featured* historical df to calculate rolling features correctly
         combined_df = pd.concat([historical_df_featured, future_df_template], ignore_index=True)
         df_featured_full = create_features(combined_df, events_df)
         
         target_cols = ['customers', 'atv']
+        
+        # --- ROBUST FEATURE SELECTION FIX ---
+        # Explicitly define the list of features the model should use.
+        # This prevents any unexpected string columns from being included.
         feature_cols = [
-            col for col in df_featured_full.columns if col not in 
-            ['date', 'doc_id', 'sales', 'customers', 'atv', 'add_on_sales', 'day_type', 'day_type_notes']
+            'month', 'dayofyear', 'weekofyear', 'year', 'dayofweek',
+            'is_payday_period', 'is_event', 'is_not_normal_day', 'is_weekend',
+            'payday_weekend_interaction', 'month_sin', 'month_cos',
+            'dayofweek_sin', 'dayofweek_cos',
+            'sales_rolling_mean_7d', 'sales_rolling_std_7d',
+            'sales_rolling_mean_14d', 'sales_rolling_std_14d',
+            'customers_rolling_mean_7d', 'customers_rolling_std_7d',
+            'customers_rolling_mean_14d', 'customers_rolling_std_14d',
+            'atv_rolling_mean_7d', 'atv_rolling_std_7d',
+            'atv_rolling_mean_14d', 'atv_rolling_std_14d'
         ]
+        # --- END FIX ---
 
-        # Use the featured historical dataframe to create the target series
         ts_target = TimeSeries.from_dataframe(
             historical_df_featured, time_col='date', value_cols=target_cols, freq='D'
         )
-        # Use the full dataframe (historical + future) for the feature series
         ts_features = TimeSeries.from_dataframe(
-            df_featured_full, time_col='date', value_cols=feature_cols, freq='D'
+            df_featured_full, time_col='date', value_cols=feature_cols, freq='D', fill_missing_dates=True, fillna_value=0
         )
-        # --- END FIX ---
 
         scaler_target = Scaler()
         scaler_features = Scaler()
@@ -201,7 +207,7 @@ def generate_forecast(historical_df, events_df, periods=15):
 
 def main():
     st.set_page_config(
-        page_title="Unified AI Forecaster v6.2",
+        page_title="Unified AI Forecaster v6.3",
         page_icon="https://upload.wikimedia.org/wikipedia/commons/thumb/3/36/McDonald%27s_Golden_Arches.svg/1200px-McDonald%27s_Golden_Arches.svg.png",
         layout="wide",
         initial_sidebar_state="expanded"
@@ -260,7 +266,7 @@ def main():
         with st.sidebar:
             st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/3/36/McDonald%27s_Golden_Arches.svg/1200px-McDonald%27s_Golden_Arches.svg.png")
             st.title("Unified AI Forecaster")
-            st.info("Atomic Build v6.2")
+            st.info("Atomic Build v6.3")
             if st.button("🔄 Refresh Data"):
                 st.cache_data.clear()
                 st.rerun()
@@ -286,7 +292,6 @@ def main():
             st.header("📈 Forecast Dashboard")
             if not st.session_state.forecast_df.empty:
                 historical_df, _ = get_data(db)
-                # We need the version with 'atv' for plotting
                 historical_df_featured = create_features(historical_df, pd.DataFrame())
                 for target in ['sales', 'customers', 'atv']:
                     fig = go.Figure()
